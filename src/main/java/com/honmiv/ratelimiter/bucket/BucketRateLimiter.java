@@ -9,6 +9,6 @@ public class BucketRateLimiter {
     @SneakyThrows
     public void throttle() {
         //TODO: implement bucket4j over Ignite throttling
-        Thread.sleep(4000);
+        Thread.sleep(5000);
     }
 }

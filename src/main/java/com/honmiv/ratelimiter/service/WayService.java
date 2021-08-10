@@ -1,33 +1,30 @@
 package com.honmiv.ratelimiter.service;
 
 import com.google.gson.Gson;
-import com.hazelcast.collection.IList;
 import com.hazelcast.collection.ItemEvent;
 import com.hazelcast.collection.ItemListener;
-import com.hazelcast.map.IMap;
 import com.honmiv.ratelimiter.bucket.BucketRateLimiter;
+import com.honmiv.ratelimiter.bus.HazelcastBus;
 import com.honmiv.ratelimiter.dto.HttpRequest;
 import com.honmiv.ratelimiter.dto.HttpResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Configuration;
 
-import java.time.LocalTime;
 import java.util.concurrent.ForkJoinPool;
 
 @Slf4j
-@Service
+@Configuration
 public class WayService {
 
     public WayService(
             BucketRateLimiter bucketRateLimiter,
             @Value("${reqs.total.new}") int newReqsTotalPerListener,
             @Value("${reqs.total.old}") int oldReqsTotalPerListener,
-            IMap<String, String> requestsMap,
-            IMap<String, String> responsesMap,
-            IList<String> requestsKeyList
+            HazelcastBus hazelcastBus
     ) {
-        requestsKeyList.addItemListener(
+        log.info("adding listener for rqKeyList");
+        hazelcastBus.setRequestListener(
                 new ItemListener<>() {
                     private final int newReqsTotal = newReqsTotalPerListener;
                     private final int oldReqsTotal = oldReqsTotalPerListener;
@@ -36,6 +33,7 @@ public class WayService {
 
                     @Override
                     public void itemAdded(ItemEvent<String> item) {
+                        log.info("rqUid {} received", item);
 
                         boolean processOldReq;
 
@@ -51,46 +49,37 @@ public class WayService {
                             newReqs = newReqsTotal;
                         }
 
-                        ForkJoinPool.commonPool().submit(() -> {
-                            bucketRateLimiter.throttle();
+                        HttpRequest httpRequest;
 
-                            HttpRequest httpRequest;
+                        if (processOldReq) {
+                            httpRequest = new Gson().fromJson(hazelcastBus.getOldRequest(), HttpRequest.class);
+                        } else {
+                            httpRequest = new Gson().fromJson(hazelcastBus.getNewRequest(), HttpRequest.class);
+                        }
 
-                            if (processOldReq) {
-                                httpRequest = new Gson().fromJson(requestsMap.get(requestsKeyList.get(0)), HttpRequest.class);
-                            } else {
-                                httpRequest = new Gson().fromJson(requestsMap.get(requestsKeyList.get(requestsKeyList.size() - 1)), HttpRequest.class);
-                            }
-                            if (httpRequest != null) {
-                                log.info("rquid = {} sending to responsesMap", httpRequest.getRqUid());
-                                requestsMap.remove(httpRequest.getRqUid());
-
-                                log.info("START {}", LocalTime.now());
-                                requestsKeyList.remove(httpRequest.getRqUid());
-                                log.info("STOP {}", LocalTime.now());
-
+                        log.info("httprquest = {}", httpRequest);
+                        if (httpRequest != null) {
+                            ForkJoinPool.commonPool().submit(() -> {
+                                log.info("throttling");
+                                bucketRateLimiter.throttle();
                                 // webClient that send http request and receive response:)))
-                                responsesMap.put(
-                                        httpRequest.getRqUid(), HttpResponse.builder()
-                                                .rqUid(httpRequest.getRqUid())
-                                                .value("response")
-                                                .build()
-                                                .toString());
-
-                                log.info("rquid {} sent to responsesMap", httpRequest.getRqUid());
-                            } else {
-                                log.warn("null wayRequest");
-                            }
-                        });
+                                String response = HttpResponse.builder()
+                                        .rqUid(httpRequest.getRqUid())
+                                        .value("response")
+                                        .build()
+                                        .toString();
+                                hazelcastBus.sendResponseToBus(httpRequest.getRqUid(), response);
+                            });
+                        } else {
+                            log.warn("null wayRequest");
+                        }
                     }
 
                     @Override
                     public void itemRemoved(ItemEvent<String> item) {
-                        // do nothing
+                        log.trace("removed rqUid = {} from requests list", item.getItem());
                     }
-                },
-                true);
+                });
         log.info("WayService initialized");
-
     }
 }
